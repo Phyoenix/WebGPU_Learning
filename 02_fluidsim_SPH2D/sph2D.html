@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU SPH Framework - Step 1: Rendering Particles</title>
+    <style>
+        body { margin: 0; background-color: #111; }
+        #webgpu-canvas {
+            display: block;
+            width: 800px;
+            height: 800px;
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 24px #000a;
+            background: #222;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="webgpu-canvas" width="800" height="800"></canvas>
+    <script>
+        // =============================================================================
+        // Main Execution
+        // =============================================================================
+        async function main() {
+            // 1. 初始化 WebGPU
+            const { device, canvas, context, format } = await initWebGPU();
+
+            // 2. 配置 SPH 参数 (目前只有粒子数量)
+            const numParticles = 4096;
+
+            // 3. 创建粒子数据和 GPU 缓冲
+            // 我们的粒子结构现在非常简单：只需要一个 vec2<f32> 的位置
+            // 在 JS 中，每个粒子是 2 个 float32，总共 4 * 2 = 8 bytes
+            const particleStructSize = 2 * 4; // size of vec2<f32> in bytes
+            const particleBufferSize = numParticles * particleStructSize;
+            
+            // 创建一个 GPU 缓冲来存储所有粒子的位置
+            const particleBuffer = device.createBuffer({
+                size: particleBufferSize,
+                // USAGE.STORAGE: 我们的 Compute Shader 将会读写它
+                // USAGE.VERTEX:  我们的 Render Shader 将会把它当作顶点数据读取
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX,
+            });
+
+            // 生成初始粒子数据 (随机分布)
+            const initialParticleData = new Float32Array(numParticles * 2);
+            for (let i = 0; i < numParticles; i++) {
+                initialParticleData[i * 2 + 0] = Math.random() * 2 - 1; // x in [-1, 1]
+                initialParticleData[i * 2 + 1] = Math.random() * 2 - 1; // y in [-1, 1]
+            }
+
+            // 将初始数据写入 GPU 缓冲
+            device.queue.writeBuffer(particleBuffer, 0, initialParticleData);
+
+            // 4. 创建渲染管线
+            const renderPipeline = createRenderPipeline(device, format);
+
+            // 5. 创建 Bind Group，将粒子缓冲连接到渲染着色器
+            const particleBindGroup = device.createBindGroup({
+                layout: renderPipeline.getBindGroupLayout(0),
+                entries: [{
+                    binding: 0,
+                    resource: { buffer: particleBuffer }
+                }]
+            });
+            
+            // 6. 渲染循环
+            function frame() {
+                const commandEncoder = device.createCommandEncoder();
+                const textureView = context.getCurrentTexture().createView();
+
+                // 开始渲染通道
+                const renderPass = commandEncoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: textureView,
+                        clearValue: { r: 0.1, g: 0.1, b: 0.15, a: 1.0 },
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                });
+
+                renderPass.setPipeline(renderPipeline);
+                renderPass.setBindGroup(0, particleBindGroup);
+                
+                // 画出所有粒子！
+                // 这会调用顶点着色器 numParticles 次
+                renderPass.draw(numParticles, 1, 0, 0);
+
+                renderPass.end();
+
+                device.queue.submit([commandEncoder.finish()]);
+
+                // 请求下一帧
+                requestAnimationFrame(frame);
+            }
+
+            // 启动渲染循环
+            requestAnimationFrame(frame);
+        }
+
+        // =============================================================================
+        // WebGPU 初始化函数
+        // =============================================================================
+        async function initWebGPU() {
+            if (!navigator.gpu) {
+                throw new Error("WebGPU not supported on this browser.");
+            }
+            const adapter = await navigator.gpu.requestAdapter();
+            if (!adapter) {
+                throw new Error("No appropriate GPUAdapter found.");
+            }
+            const device = await adapter.requestDevice();
+
+            const canvas = document.getElementById('webgpu-canvas');
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({
+                device: device,
+                format: format,
+                alphaMode: 'opaque',
+            });
+
+            return { device, canvas, context, format };
+        }
+
+        // =============================================================================
+        // 创建渲染管线函数
+        // =============================================================================
+        function createRenderPipeline(device, format) {
+            const wgslCode = `
+                // 简单的粒子结构，只包含位置
+                struct Particle {
+                    position: vec2<f32>,
+                };
+                
+                // 粒子数据以 Storage Buffer 的形式传入
+                // @group(0) @binding(0) 表示这个缓冲来自第一个 bind group 的第 0 个绑定点
+                @group(0) @binding(0) var<storage, read> particles: array<Particle>;
+
+                // 顶点着色器的输出
+                struct VertexOutput {
+                    @builtin(position) pos: vec4<f32>,
+                    @location(0) color: vec4<f32>,
+                };
+                
+                // ===== 顶点着色器 =====
+                @vertex
+                fn vs_main(@builtin(vertex_index) index : u32) -> VertexOutput {
+                    var output: VertexOutput;
+                    
+                    // 从 storage buffer 中读取当前粒子的位置
+                    let pos = particles[index].position;
+
+                    // 将 2D 位置转换为 4D 裁剪空间位置
+                    // 我们还定义了粒子的大小
+                    let particle_size = 0.005; 
+                    output.pos = vec4<f32>(pos, 0.0, 1.0);
+                    output.pos.x *= particle_size;
+                    output.pos.y *= particle_size;
+                    
+                    // 设置粒子颜色
+                    output.color = vec4<f32>(0.2, 0.6, 1.0, 1.0); // 蓝色
+                    
+                    return output;
+                }
+
+                // ===== 片元着色器 =====
+                @fragment
+                fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+                    // 直接输出从顶点着色器传来的颜色
+                    return input.color;
+                }
+            `;
+            
+            const shaderModule = device.createShaderModule({ code: wgslCode });
+
+            const pipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: shaderModule,
+                    entryPoint: 'vs_main',
+                    // 注意：这里 buffers 数组是空的！
+                    // 因为我们不是通过传统的顶点缓冲 (Vertex Buffer) 传入数据，
+                    // 而是直接在着色器里通过 vertex_index 从存储缓冲 (Storage Buffer) 读取。
+                    // 这对于粒子系统来说非常高效。
+                    buffers: [], 
+                },
+                fragment: {
+                    module: shaderModule,
+                    entryPoint: 'fs_main',
+                    targets: [{ format: format }],
+                },
+                primitive: {
+                    // 我们要画的是点，而不是三角形
+                    topology: 'point-list',
+                },
+            });
+
+            return pipeline;
+        }
+
+        // 启动程序
+        main().catch(err => console.error(err));
+    </script>
+</body>
+</html>

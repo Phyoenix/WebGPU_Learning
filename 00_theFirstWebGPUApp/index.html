@@ -8,35 +8,33 @@
   <body>
     <canvas width="512" height="512"></canvas>
     <script type="module">
-      const canvas = document.querySelector("canvas");
-			if(!navigator.gpu) {
-				throw new Error("WebGPU not supported on this browser");
-			}
-			const adapter = await navigator.gpu.requestAdapter();
-			if(!adapter) {
-				throw new Error("Failed to get GPU adapter");
-			}
-			const device = await adapter.requestDevice();
-			const context = canvas.getContext("webgpu");
-			const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
-			context.configure({
-				device: device,
-				format: canvasFormat,
-			});
-
-			const pipeline = device.createRenderPipeline({
-				layout: "auto",
-				vertex: {
-					module: device.createShaderModule({
-						code: `
-							struct VertexInput {
-}
-					})
-				}
-			})
+		// canvas initialization
+    	const canvas = document.querySelector("canvas");
+		if(!navigator.gpu) {
+			throw new Error("WebGPU not supported on this browser");
 		}
-	}
-}
+		const adapter = await navigator.gpu.requestAdapter();
+		if(!adapter) {
+			throw new Error("Failed to get GPU adapter");
+		}
+		const device = await adapter.requestDevice();
+		const context = canvas.getContext("webgpu");
+		const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+		context.configure({
+			device: device,
+			format: canvasFormat,
+		});
+
+		const enconder = device.createCommandEncoder();
+		const pass = encoder.beginRenderPass({
+		  colorAttachments: [{
+		    view: context.getCurrentTexture().createView(),
+		    loadOp: "clear",
+		    clearValue: { r: 0, g: 0, b: 0.4, a: 1 },
+		    storeOp: "store",
+		  }]
+		});
+		pass.end();
     </script>
   </body>
 </html>
